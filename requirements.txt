@@ -1,0 +1,13 @@
+# Core
+streamlit>=1.32
+pandas>=2.1
+numpy>=1.26
+
+# Optional deps you guarded with try/except
+Pillow>=10.0         # for from PIL import Image
+pytesseract>=0.3.10  # for OCR (needs system Tesseract installed)
+PyPDF2>=3.0.0        # for PdfReader
+pdf2image>=1.17.0    # to rasterize PDFs (needs system Poppler)
+
+# Excel
+openpyxl>=3.1

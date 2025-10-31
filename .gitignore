@@ -1,0 +1,17 @@
+# Python & Streamlit
+__pycache__/
+*.pyc
+.venv/
+.env
+.streamlit/secrets.toml
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Large data
+data/*.xlsx
+*.pdf
+*.csv
