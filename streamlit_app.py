@@ -49,6 +49,29 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ---------- Sidebar: upload Excel template
+st.sidebar.header("Data")
+xlsx_file = st.sidebar.file_uploader("Upload data template (.xlsx or .xls)", type=["xlsx", "xls"])
+
+# Pre-allocate so downstream never NameErrors
+products = pd.DataFrame()
+factors = pd.DataFrame()
+spi_scoring = pd.DataFrame()
+
+if xlsx_file is not None:
+    st.sidebar.info(f"Excel file received ✅ ({xlsx_file.name})")
+
+    try:
+        # Support both .xlsx and .xls formats
+        if xlsx_file.name.endswith(".xls"):
+            products = pd.read_excel(xlsx_file, engine="xlrd")
+        else:
+            products = pd.read_excel(xlsx_file, engine="openpyxl")
+
+    except Exception as e:
+        st.error(f"❌ Failed to read Excel file: {e}")
+        st.stop()
+
 # ---------------- State ----------------
 if "files" not in st.session_state:
     st.session_state.files: List[Dict[str, Any]] = []
@@ -451,21 +474,33 @@ st.caption("⚡ Fresh start — previous uploads are cleared each time.")
 
 # Optional: CO₂ factors file uploader (separate)
 with st.expander("Optional: Upload a CO₂ factors sheet (columns: material, co2_factor_kg_per_kg)"):
-    co2_up = st.file_uploader("CO₂ factors file (XLSX/CSV)", type=["xlsx","csv"], accept_multiple_files=False, key="co2u")
+    co2_up = st.file_uploader(
+        "CO₂ factors file (XLSX/XLS/CSV)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=False,
+        key="co2u"
+    )
+
     if co2_up:
         try:
-            if co2_up.name.lower().endswith(".csv"):
+            name = co2_up.name.lower()
+            if name.endswith(".csv"):
                 st.session_state.co2_factors_df = pd.read_csv(co2_up)
-            else:
-                st.session_state.co2_factors_df = pd.read_excel(co2_up)
-            st.success(f"Loaded CO₂ table: {len(st.session_state.co2_factors_df):,} rows")
+            elif name.endswith(".xls"):
+                st.session_state.co2_factors_df = pd.read_excel(co2_up, engine="xlrd")
+            else:  # .xlsx
+                st.session_state.co2_factors_df = pd.read_excel(co2_up, engine="openpyxl")
+
+            st.success(f"✅ Loaded CO₂ table: {len(st.session_state.co2_factors_df):,} rows from {co2_up.name}")
+
         except Exception as e:
-            st.error(f"Failed to read CO₂ table: {e}")
+            st.error(f"❌ Failed to read CO₂ table: {e}")
+            st.stop()
 
 c1, c2 = st.columns([1,1])
 with c1:
     uploaded = st.file_uploader(
-        "Upload any document (PDF, XLSX, JPEG, PNG, CSV, TXT…)",
+        "Upload any document (PDF, XLSX, XLS, JPEG, PNG, CSV, TXT…)",
         type=None, accept_multiple_files=True
     )
 with c2:
@@ -850,7 +885,7 @@ if not items_df.empty:
         dd = semantic_filter(df, scope_kw)
         dd = _apply_keyword_filter(dd, scope_kw)
         left_key = "co2_material_hint" if "co2_material_hint" in dd.columns \
-                   else ("material" if "material" in dd.columns else None)
+                   else ("material" if "material" in df.columns else None)
         if not left_key or "material" not in co2_df.columns:
             return None
         jj = dd.merge(co2_df[["material","co2_factor_kg_per_kg"]],
@@ -942,7 +977,7 @@ if not items_df.empty:
             if w.empty or w.notna().sum() == 0:
                 st.warning("No weight data available.")
                 return
-            qty = pd.to_numeric(dd["Quantity"], errors="coerce").fillna(1) if "Quantity" in dd.columns else 1
+            qty = pd.to_numeric(dd["Quantity"], errors="coerce").fillna(1) if "Quantity" in df.columns else 1
             total_w = float((w.fillna(0) * qty).sum())
             st.info(f"**Total weight{f' for {scope_kw}' if scope_kw else ''}:** {total_w:,.2f} kg")
             return
