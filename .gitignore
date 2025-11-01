@@ -1,17 +1,62 @@
+# =====================================
 # Python & Streamlit
+# =====================================
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
 .venv/
-.env
-.streamlit/secrets.toml
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+.pytest_cache/
 
-# OS/Editor
+# Streamlit config & secrets
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Jupyter / notebooks (if any)
+.ipynb_checkpoints/
+
+# =====================================
+# OS & Editors
+# =====================================
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Large data
-data/*.xlsx
-*.pdf
+# =====================================
+# Logs & temporary files
+# =====================================
+*.log
+*.tmp
+*.bak
+
+# =====================================
+# Local scripts / run files
+# =====================================
+run.bat
+run_visible.bat
+
+# =====================================
+# Large or generated data files
+# =====================================
+data/
 *.csv
+*.tsv
+*.xlsx
+*.xls
+*.pdf
+*.zip
+*.tar
+*.gz
+
+# =====================================
+# VSCode dev container (optional)
+# =====================================
+.devcontainer/
