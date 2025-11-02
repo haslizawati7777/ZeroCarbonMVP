@@ -6,7 +6,7 @@ numpy>=1.26
 # === Excel I/O and export ===
 openpyxl>=3.1.2
 xlsxwriter>=3.2.0
-xlrd==2.0.1   # for legacy .xls support only
+xlrd==1.2.0   # v1.x required for legacy .xls support
 
 # === Machine learning / semantic analysis ===
 scikit-learn>=1.5.0
