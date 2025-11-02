@@ -530,6 +530,10 @@ def _duck_search(path: str, kw: str, offset: int, limit: int) -> pd.DataFrame:
     return con.execute(q, [path, k, k, k, k, k, k, limit, offset]).df()
 # ================================================================================
 
+# >>> DROP-IN PATTERN START
+# (Paste the “drop-in pattern” block you’ll send next; I will replace this comment
+# and everything up to the END marker below with your provided version.)
+# >>> DROP-IN PATTERN END
 
 # ---------------- Upload area ----------------
 st.markdown("<div class='centered-area'>", unsafe_allow_html=True)
@@ -1175,7 +1179,10 @@ if not items_df.empty:
         if re.search(r"\bhow many\b|\bcount\b", q) or re.fullmatch(r".*\s*count", q):
             kw_eff = _effective_scope_from_query(q, scope_kw)
             dd = _apply_keyword_filter(df, kw_eff)
-            st.success(f"**Count:** {len(dd):,} item(s){f' matching \"{kw_eff}\"' if kw_eff else ''}.")
+            if kw_eff:
+                st.success(f"**Count:** {len(dd):,} item(s) matching \"{kw_eff}\".")
+            else:
+                st.success(f"**Count:** {len(dd):,} item(s).")
             return
 
         # average price
