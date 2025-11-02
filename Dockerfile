@@ -28,8 +28,8 @@ ENV STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
     PYTHONUNBUFFERED=1
 
-# Expose port
-EXPOSE 8501
+# Expose (Render will set $PORT at runtime; EXPOSE is optional/for docs)
+EXPOSE 10000
 
-# Run Streamlit
-CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# IMPORTANT: bind to Render's PORT (fallback 10000 for local)
+CMD ["bash", "-lc", "streamlit run streamlit_app.py --server.port=${PORT:-10000} --server.address=0.0.0.0"]
