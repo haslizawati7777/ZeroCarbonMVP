@@ -601,6 +601,16 @@ run = st.button("Run analysis", use_container_width=True)
 # ------------------- ANALYSIS -------------------
 if run:
     blobs = []
+
+    # NEW: include sidebar Excel in the analysis if provided
+    if xlsx_file is not None and not products.empty:
+        blobs.append({
+            "name": xlsx_file.name,
+            "type": "application/vnd.ms-excel",
+            "text": "",
+            "excel": products,   # already loaded DataFrame
+        })
+
     with st.spinner("Parsing files…"):
         for f in st.session_state.files:
             name, ftype, bts = f["name"], f["type"], f["bytes"]
