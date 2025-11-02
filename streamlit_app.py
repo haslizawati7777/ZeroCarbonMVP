@@ -10,6 +10,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# --- Added for Plan B (DuckDB + Parquet paging) ---
+import os
+import tempfile
+import duckdb
+# ---------------------------------------------------
+
 # -------- Optional deps (guarded) --------
 try:
     from PIL import Image
@@ -465,6 +471,66 @@ def price_band_predict(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# =================== Plan B helpers (inserted above `if run:`) ===================
+@st.cache_data(show_spinner=False)
+def _persist_to_parquet(df: pd.DataFrame) -> str:
+    """
+    Write the large items_df to a temp parquet file and return its path.
+    Cached by the dataframe content hash so it only writes when data changes.
+    """
+    base = tempfile.gettempdir()
+    key = f"items_{len(df)}_{hash(tuple(df.columns))}"
+    out_dir = os.path.join(base, "zproc_cache")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{key}.parquet")
+
+    if not os.path.exists(path):
+        # engine auto-picks pyarrow if present
+        df.to_parquet(path, index=False)
+    return path
+
+@st.cache_data(show_spinner=False)
+def _duck_count(path: str) -> int:
+    """Fast total row count from parquet without loading to RAM."""
+    con = duckdb.connect()
+    return con.execute("SELECT COUNT(*) FROM read_parquet(?)", [path]).fetchone()[0]
+
+@st.cache_data(show_spinner=False)
+def _duck_page(path: str, offset: int, limit: int) -> pd.DataFrame:
+    """
+    Return a page of rows from parquet. No full materialization—streamed via DuckDB.
+    """
+    con = duckdb.connect()
+    q = """
+        SELECT *
+        FROM read_parquet(?)
+        LIMIT ? OFFSET ?
+    """
+    return con.execute(q, [path, limit, offset]).df()
+
+@st.cache_data(show_spinner=False)
+def _duck_search(path: str, kw: str, offset: int, limit: int) -> pd.DataFrame:
+    """
+    Keyword search across a few columns (lower-cased LIKE) without loading the whole file.
+    """
+    con = duckdb.connect()
+    q = """
+        SELECT *
+        FROM read_parquet(?)
+        WHERE
+            lower(COALESCE("Item Name", ''))       LIKE '%' || ? || '%'
+         OR lower(COALESCE(item_name, ''))         LIKE '%' || ? || '%'
+         OR lower(COALESCE("Manufacturer_Name",''))LIKE '%' || ? || '%'
+         OR lower(COALESCE(manufacturer_name,''))  LIKE '%' || ? || '%'
+         OR lower(COALESCE(Material,''))           LIKE '%' || ? || '%'
+         OR lower(COALESCE(material,''))           LIKE '%' || ? || '%'
+        LIMIT ? OFFSET ?
+    """
+    k = kw.strip().lower()
+    return con.execute(q, [path, k, k, k, k, k, k, limit, offset]).df()
+# ================================================================================
+
+
 # ---------------- Upload area ----------------
 st.markdown("<div class='centered-area'>", unsafe_allow_html=True)
 
@@ -576,34 +642,95 @@ if run:
 items_df = st.session_state.analysis.get("items", pd.DataFrame())
 
 if not items_df.empty:
-    build_vector_index(items_df)
-    st.subheader("AI Analysis — Extracted Equipment Table")
+    # Keep a reference for NLQ below
+    view = items_df
 
-    # Quick filter removed — show full table only
-    view = items_df.copy()
-    st.dataframe(view, use_container_width=True, height=420)
+    # Decide threshold where we switch to disk-backed paging
+    BIG_THRESHOLD = 100_000  # tune as needed
 
-    # Exports
-    c1, c2 = st.columns(2)
-    with c1:
-        out = io.BytesIO()
-        with pd.ExcelWriter(out, engine="openpyxl") as xw:
-            view.to_excel(xw, index=False, sheet_name="items")
-        st.download_button(
-            "⬇️ Download Excel",
-            out.getvalue(),
-            file_name="zproc_ai_items.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-    with c2:
-        st.download_button(
-            "⬇️ Download CSV",
-            view.to_csv(index=False).encode("utf-8"),
-            file_name="zproc_ai_items.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+    if len(items_df) <= BIG_THRESHOLD:
+        # --- Original small-table path (unchanged) ---
+        build_vector_index(items_df)  # existing call
+        st.subheader("AI Analysis — Extracted Equipment Table")
+        st.dataframe(view, use_container_width=True, height=420)
+
+        # Exports (unchanged)
+        c1, c2 = st.columns(2)
+        with c1:
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine="openpyxl") as xw:
+                view.to_excel(xw, index=False, sheet_name="items")
+            st.download_button(
+                "⬇️ Download Excel",
+                out.getvalue(),
+                file_name="zproc_ai_items.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        with c2:
+            st.download_button(
+                "⬇️ Download CSV",
+                view.to_csv(index=False).encode("utf-8"),
+                file_name="zproc_ai_items.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    else:
+        # --- NEW: Big-table path (DuckDB from Parquet) ---
+        st.subheader("AI Analysis — Extracted Equipment Table (DuckDB • paged)")
+        pq_path = _persist_to_parquet(items_df)
+
+        total = _duck_count(pq_path)
+        st.caption(f"Dataset: {total:,} rows • disk-backed via DuckDB")
+
+        # Paging controls
+        colA, colB, colC = st.columns([1,1,2])
+        with colA:
+            page_size = st.selectbox("Rows per page", [100, 250, 500, 1000], index=2)
+        with colB:
+            page = st.number_input(
+                "Page",
+                min_value=1,
+                max_value=max(1, (total + int(page_size) - 1) // int(page_size)),
+                value=1,
+                step=1
+            )
+        with colC:
+            kw = st.text_input("Quick filter (keyword search across item/manufacturer/material)", "")
+
+        offset = (int(page) - 1) * int(page_size)
+
+        # Page fetch
+        if kw.strip():
+            page_df = _duck_search(pq_path, kw, offset=offset, limit=int(page_size))
+        else:
+            page_df = _duck_page(pq_path, offset=offset, limit=int(page_size))
+
+        st.dataframe(page_df, use_container_width=True, height=420)
+
+        # Exports: still give full-data exports (using existing in-memory df)
+        c1, c2 = st.columns(2)
+        with c1:
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine="openpyxl") as xw:
+                items_df.to_excel(xw, index=False, sheet_name="items")
+            st.download_button(
+                "⬇️ Download Excel (full)",
+                out.getvalue(),
+                file_name="zproc_ai_items.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        with c2:
+            st.download_button(
+                "⬇️ Download CSV (full)",
+                items_df.to_csv(index=False).encode("utf-8"),
+                file_name="zproc_ai_items.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        st.info("Semantic index disabled for large datasets; keyword search & DuckDB filter are active.")
 
     # ===================== Natural-Language Query Module (v3) =====================
     import re
@@ -780,7 +907,6 @@ if not items_df.empty:
             if pinned_cat == "drilling":
                 if t in {"tool","tools"}:
                     bases |= {
-                        # common drilling tool families / items
                         "stabilizer","reamer","bit","bits","float collar","float shoe",
                         "centralizer","sub","subs","crossover","jar","shock sub","rotary",
                         "drill pipe","dp","kelly","packer","hanger","liner hanger","plug",
@@ -883,7 +1009,7 @@ if not items_df.empty:
         if co2_df is None or co2_df.empty:
             return None
         dd = semantic_filter(df, scope_kw)
-        dd = _apply_keyword_filter(dd, scope_kw)
+        dd = _apply_keyword_filter(df, scope_kw)
         left_key = "co2_material_hint" if "co2_material_hint" in dd.columns \
                    else ("material" if "material" in df.columns else None)
         if not left_key or "material" not in co2_df.columns:
@@ -1066,7 +1192,7 @@ if not items_df.empty:
         # cheapest
         if re.search(r"\b(min|minimum|lowest|cheapest)\b(?!.*co2)", q) or re.search(r"\bcheapest\b", q):
             dd = semantic_filter(df, scope_kw)
-            dd = _apply_keyword_filter(dd, scope_kw)
+            dd = _apply_keyword_filter(df, scope_kw)
             price = _price_series(dd)
             if price.empty or price.notna().sum() == 0:
                 st.warning("No price data available.")
@@ -1083,7 +1209,7 @@ if not items_df.empty:
         # most expensive
         if re.search(r"\b(max|maximum|highest|most\s+expensive)\b(?!.*co2)", q):
             dd = semantic_filter(df, scope_kw)
-            dd = _apply_keyword_filter(dd, scope_kw)
+            dd = _apply_keyword_filter(df, scope_kw)
             price = _price_series(dd)
             if price.empty or price.notna().sum() == 0:
                 st.warning("No price data available.")
