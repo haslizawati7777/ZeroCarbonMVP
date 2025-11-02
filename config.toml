@@ -1,0 +1,5 @@
+[server]
+headless = true
+enableXsrfProtection = true
+enableCORS = false
+port = 8501
