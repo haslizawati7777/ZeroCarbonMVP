@@ -716,7 +716,7 @@ if not items_df.empty:
 
         # Page fetch
         if kw.strip():
-            page_df = _duck_search(pq_path, kw, offset=offset, limit=int(page_size))
+            page_df = _duck_search(pq_path, offset=offset, limit=int(page_size), kw=kw)
         else:
             page_df = _duck_page(pq_path, offset=offset, limit=int(page_size))
 
@@ -917,21 +917,6 @@ if not items_df.empty:
             if t == "api":
                 bases.add("api")
 
-            # domain boost: when pinned to drilling, expand 'tools' and 'mud'
-            if pinned_cat == "drilling":
-                if t in {"tool","tools"}:
-                    bases |= {
-                        "stabilizer","reamer","bit","bits","float collar","float shoe",
-                        "centralizer","sub","subs","crossover","jar","shock sub","rotary",
-                        "drill pipe","dp","kelly","packer","hanger","liner hanger","plug",
-                        "cementing","float equipment","shoe track","guide shoe"
-                    }
-                if t in {"mud","fluid","fluids"}:
-                    bases |= {
-                        "drilling fluid","drilling fluids","wbm","obm","base oil",
-                        "water based mud","oil based mud","bentonite","barite",
-                        "emulsifier","fluid loss","viscosifier","lignite","brine"
-                    }
             return list(bases)
 
         def _token_and(cols: List[str], toks_left: List[str]) -> pd.Series:
@@ -1023,7 +1008,7 @@ if not items_df.empty:
         if co2_df is None or co2_df.empty:
             return None
         dd = semantic_filter(df, scope_kw)
-        dd = _apply_keyword_filter(df, scope_kw)
+        dd = _apply_keyword_filter(dd, scope_kw)  # PATCH 1A
         left_key = "co2_material_hint" if "co2_material_hint" in dd.columns \
                    else ("material" if "material" in df.columns else None)
         if not left_key or "material" not in co2_df.columns:
@@ -1046,53 +1031,79 @@ if not items_df.empty:
                 return None
         return float(jj["co2_factor_kg_per_kg"].mean())
 
+    # ======== Your existing _manufacturers_for_keyword (unchanged from last step) ========
     def _manufacturers_for_keyword(df: pd.DataFrame, kw: str) -> pd.DataFrame:
+        """
+        Returns manufacturers for a keyword, with aggressive name cleaning:
+          - Uses _apply_keyword_filter(df, kw) to match phrase + token-AND + synonyms
+          - Fallback token-AND across item/category/subcategory/material/material_group (+ Title-Case fallbacks)
+          - Strips trailing 'Partner …', 'Regional …', site/plant/branch codes, and numeric codes
+          - Collapses whitespace and groups case-insensitively to remove overlaps
+        """
         if not kw or "manufacturer_name" not in df.columns:
             return pd.DataFrame()
-        fields = [c for c in ["item_name","category","subcategory","material"] if c in df.columns]
-        if not fields:
-            return pd.DataFrame()
-        kwl = kw.strip().lower()
-        mask = False
-        for c in fields:
-            mask = mask | df[c].astype(str).str.lower().str.contains(kwl, na=False)
-        dd = df[mask]
+
+        # First try the robust filter pipeline you already use elsewhere
+        dd = _apply_keyword_filter(df, kw)
+
+        # If that yields nothing, do a local token-AND across wider fields
+        if dd.empty:
+            fields = [c for c in [
+                "item_name","category","subcategory","material","material_group",
+                "Item Name","Category","Subcategory","Material","MaterialGroup","Group","Group Code"
+            ] if c in df.columns]
+            if not fields:
+                return pd.DataFrame()
+
+            q = kw.strip().lower()
+            # treat equipment/items plurals as neutral tokens (don’t block real matches)
+            STOP = {"item","items","equipment","equipments"}
+            toks = [t for t in re.findall(r"[a-z0-9]+", q) if t not in STOP]
+            if not toks:
+                toks = [q]  # fallback to full phrase
+
+            def norm(s: pd.Series) -> pd.Series:
+                return s.astype(str).str.lower().str.replace(r"\s+", " ", regex=True)
+
+            m = pd.Series(True, index=df.index)
+            for t in toks:
+                any_col = pd.Series(False, index=df.index)
+                pat = rf"\b{re.escape(t)}\b"
+                for c in fields:
+                    any_col = any_col | norm(df[c]).str.contains(pat, na=False, regex=True)
+                m = m & any_col
+            dd = df[m].copy()
+
         if dd.empty:
             return pd.DataFrame()
-        out = dd["manufacturer_name"].astype(str).str.strip()
-        out = out[out != ""]
-        if out.empty:
-            return pd.DataFrame()
-        return (out.to_frame(name="manufacturer_name")
-                  .groupby("manufacturer_name").size()
-                  .sort_values(ascending=False)
-                  .rename("count").reset_index())
 
-    # ======== REPLACED: _ensure_nlq_columns with your version ========
-    def _ensure_nlq_columns(df: pd.DataFrame) -> pd.DataFrame:
-        alias_map = {
-            "category": ["category", "Category"],
-            "subcategory": ["subcategory", "Subcategory"],
-            "item_name": ["item_name", "Item Name", "Description"],
-            "manufacturer_name": ["manufacturer_name", "Manufacturer_Name", "Manufacturer Name"],
-            "material": ["material", "Material"],
-            "country": ["country", "Country", "Country of Origin", "Origin"],
-            "price": ["price", "Price_per_unit_USD", "Unit Price", "Price USD"],
-            "price_low": ["price_low", "Price Low"],
-            "price_high": ["price_high", "Price High"],
-            "avg_price_usd": ["avg_price_usd", "Avg Price USD"],
-            # NEW: weight + NPS aliases
-            "unitweight_kg": ["unitweight_kg", "UnitWeight_kg", "Weight_kg", "Unit Weight", "Unit Weight (kg)", "Weight (kg)"],
-            "nps_in": ["nps_in", "NPS (in)", "NPS", "Size (in)", "Nominal Pipe Size", "Nominal Size"],
-        }
-        df = df.copy()
-        for tgt, candidates in alias_map.items():
-            for c in candidates:
-                if c in df.columns:
-                    df[tgt] = df[c]
-                    break
-        return df
-    # ================================================================
+        # --- Clean manufacturer names ---
+        mans = dd["manufacturer_name"].astype(str).fillna("").str.strip()
+
+        mans = mans.str.replace(r"(?i)\bpartner\b.*$", "", regex=True)          # kill "Partner …"
+        mans = mans.str.replace(r"(?i)\bregion(?:al)?\b.*$", "", regex=True)    # kill "Regional …"
+        mans = mans.str.replace(r"(?i)[\s\-_/]*(?:plant|site|branch|division|unit)\s*\d+[A-Za-z\-]*$", "", regex=True)
+        mans = mans.str.replace(r"\([^)]+\)$", "", regex=True)                  # remove trailing (…) codes
+        mans = mans.str.replace(r"[\s\-_/]*\d+[A-Za-z\-]*$", "", regex=True)    # remove trailing numbers/codes
+        mans = mans.str.replace(r"\s{2,}", " ", regex=True).str.strip()
+
+        mans = mans[~mans.str.fullmatch(r"(?i)(n/?a|na|unknown|nil|none)?", na=False)]
+        mans = mans[mans != ""]
+        if mans.empty:
+            return pd.DataFrame()
+
+        tmp = pd.DataFrame({"manufacturer_name": mans})
+        tmp["_canon"] = tmp["manufacturer_name"].str.casefold()
+
+        out = (tmp.groupby("_canon")
+                  .agg(manufacturer_name=("manufacturer_name", "first"),
+                       count=("manufacturer_name", "size"))
+                  .sort_values(["count", "manufacturer_name"], ascending=[False, True])
+                  .reset_index(drop=True))
+
+        out.insert(0, "rank", range(1, len(out) + 1))
+        return out[["rank", "manufacturer_name", "count"]]
+    # ================================================================================
 
     def answer_query(query: str, df: pd.DataFrame, co2_df: Optional[pd.DataFrame] = None):
         df = _ensure_nlq_columns(df)
@@ -1173,16 +1184,51 @@ if not items_df.empty:
             return
         # -----------------------------------
 
-        # manufacturer intent
-        manu_pat = re.search(r"(?:who\s+is\s+the\s+)?(?:manufacturer|vendor|supplier)\s+(?:for|of)\s+(.+)", q)
-        if manu_pat:
-            kw = manu_pat.group(1).strip()
-            res = _manufacturers_for_keyword(df, kw)
+        # manufacturer intent — supports "manufacturer for X", "X manufacturer", "who makes X"
+        manu_kw = None
+        m1 = re.search(r"(?:who\s+is\s+the\s+)?(?:manufacturer|vendor|supplier)\s+(?:for|of)\s+(.+)", q)
+        m2 = re.search(r"(.+?)\s+(?:manufacturer|vendor|supplier)s?$", q)   # e.g., "drilling manufacturer"
+        m3 = re.search(r"(?:who\s+makes|maker\s+of)\s+(.+)", q)
+        if m1:
+            manu_kw = m1.group(1).strip()
+        elif m2:
+            manu_kw = m2.group(1).strip()
+        elif m3:
+            manu_kw = m3.group(1).strip()
+
+        if manu_kw:
+            res = _manufacturers_for_keyword(df, manu_kw)
             if res.empty:
-                st.info(f"No manufacturers found for **{kw}**.")
+                st.info(f"No manufacturers found for **{manu_kw}**.")
             else:
-                st.write(f"**Manufacturers for '{kw}':**")
-                st.dataframe(res, use_container_width=True, height=240)
+                # --- NEW: compact list output (no index, no count). Rename rank->number.
+                df_out = res.rename(columns={"rank": "number"})[["number", "manufacturer_name"]]
+                st.write(f"**Manufacturers for '{manu_kw}':**")
+                lines = [f"{int(n)}. {m}" for n, m in zip(df_out["number"], df_out["manufacturer_name"])]
+                st.markdown("\n".join(lines))
+            return
+
+        # COUNTRY intent (e.g., "country for stabilizer")
+        country_pat = re.search(r"(?:country|origin)\s+(?:for|of)\s+(.+)", q)
+        if country_pat and "country" in df.columns:
+            kw = country_pat.group(1).strip()
+            # reuse your filter pipeline
+            dd = _apply_keyword_filter(df, kw)
+            if dd.empty:
+                dd = semantic_filter(df, kw)
+                dd = _apply_keyword_filter(dd, kw)
+            if dd.empty or dd["country"].astype(str).str.strip().eq("").all():
+                st.info(f"No country/origin found for **{kw}**.")
+            else:
+                out = (dd.assign(country=dd["country"].astype(str).str.strip())
+                         .loc[lambda x: x["country"] != ""]
+                         .groupby("country")
+                         .size()
+                         .sort_values(ascending=False)
+                         .rename("count")
+                         .reset_index())
+                st.write(f"**Country of origin for '{kw}':**")
+                st.dataframe(out, use_container_width=True, height=240)
             return
 
         # COUNT — operate over full matching universe (no semantic cap)
@@ -1209,7 +1255,9 @@ if not items_df.empty:
         # cheapest
         if re.search(r"\b(min|minimum|lowest|cheapest)\b(?!.*co2)", q) or re.search(r"\bcheapest\b", q):
             dd = semantic_filter(df, scope_kw)
-            dd = _apply_keyword_filter(df, scope_kw)
+            dd = _apply_keyword_filter(dd, scope_kw)  # PATCH 1B
+            if dd.empty:
+                dd = _apply_keyword_filter(df, scope_kw)
             price = _price_series(dd)
             if price.empty or price.notna().sum() == 0:
                 st.warning("No price data available.")
@@ -1226,7 +1274,9 @@ if not items_df.empty:
         # most expensive
         if re.search(r"\b(max|maximum|highest|most\s+expensive)\b(?!.*co2)", q):
             dd = semantic_filter(df, scope_kw)
-            dd = _apply_keyword_filter(df, scope_kw)
+            dd = _apply_keyword_filter(dd, scope_kw)  # PATCH 1C
+            if dd.empty:
+                dd = _apply_keyword_filter(df, scope_kw)
             price = _price_series(dd)
             if price.empty or price.notna().sum() == 0:
                 st.warning("No price data available.")
@@ -1275,6 +1325,33 @@ if not items_df.empty:
             "Try e.g. *weight for shaker screen*, *total weight for drilling tools*, *country for stabilizer*, *cheapest drilling*, *total spend cameron*."
         )
 
+    # ======== REPLACED: _ensure_nlq_columns with your version (+ material_group) ========
+    def _ensure_nlq_columns(df: pd.DataFrame) -> pd.DataFrame:
+        alias_map = {
+            "category": ["category", "Category"],
+            "subcategory": ["subcategory", "Subcategory"],
+            "item_name": ["item_name", "Item Name", "Description"],
+            "manufacturer_name": ["manufacturer_name", "Manufacturer_Name", "Manufacturer Name"],
+            "material": ["material", "Material"],
+            "material_group": ["material_group", "MaterialGroup", "Material Group", "Group", "Group Code"],
+            "country": ["country", "Country", "Country of Origin", "Origin"],
+            "price": ["price", "Price_per_unit_USD", "Unit Price", "Price USD"],
+            "price_low": ["price_low", "Price Low"],
+            "price_high": ["price_high", "Price High"],
+            "avg_price_usd": ["avg_price_usd", "Avg Price USD"],
+            # NEW: weight + NPS aliases
+            "unitweight_kg": ["unitweight_kg", "UnitWeight_kg", "Weight_kg", "Unit Weight", "Unit Weight (kg)", "Weight (kg)"],
+            "nps_in": ["nps_in", "NPS (in)", "NPS", "Size (in)", "Nominal Pipe Size", "Nominal Size"],
+        }
+        df = df.copy()
+        for tgt, candidates in alias_map.items():
+            for c in candidates:
+                if c in df.columns:
+                    df[tgt] = df[c]
+                    break
+        return df
+    # ===================== End NLQ v3 =====================
+
     st.subheader("Ask a question about the table")
     with st.form("nlq_form_v3", clear_on_submit=False):
         nlq = st.text_input(
@@ -1282,6 +1359,7 @@ if not items_df.empty:
             "'top 5 vendors for drilling', 'total spend cameron', 'average CO₂ for valves', 'who is the manufacturer for float collar'"
         )
         asked = st.form_submit_button("Ask")
+
     if asked:
         try:
             answer_query(nlq, view, st.session_state.co2_factors_df)
